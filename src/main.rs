@@ -19,6 +19,7 @@ fn main() -> Result<()> {
             width: 960,
             height: 960,
         })
+        .with_resizable(false)
         .build(&event_loop)?;
 
     let instance = wgpu::Instance::new(wgpu::Backends::PRIMARY);
@@ -36,7 +37,6 @@ fn main() -> Result<()> {
                 ..
             } => {
                 *control_flow = ControlFlow::Exit;
-                return;
             }
             Event::WindowEvent {
                 event:
@@ -47,23 +47,30 @@ fn main() -> Result<()> {
                     },
                 ..
             } => {
-                println!("hi!");
+                state.submit_player_event(());
+            }
+            Event::MainEventsCleared => {
+                let now = Instant::now();
+                accum += (now - last_time).as_secs_f64();
+
+                while accum >= TICK_RATE {
+                    accum -= TICK_RATE;
+                    if accum < TICK_RATE {
+                        // last update before render, save previos iteration for interpolation/extrapolation
+                        // NOTE: if the state gets too large, it might be worth it to stop doing interpolation to save a bit of time here
+                        last_state = state.clone();
+                    }
+                    state.update(TICK_RATE);
+                }
+
+                let render_result = render_state.render(accum / TICK_RATE, &state, &last_state);
+                if let Err(e) = render_result {
+                    eprintln!("WARNING, Render error occured! {}", e);
+                }
+
+                last_time = now;
             }
             _ => {}
         }
-        let now = Instant::now();
-        accum += (now - last_time).as_secs_f64();
-
-        while accum >= TICK_RATE {
-            accum -= TICK_RATE;
-            if accum < TICK_RATE {
-                last_state = state.clone();
-            }
-            state.update(TICK_RATE);
-        }
-
-        render_state.render(accum / TICK_RATE, &state, &last_state);
-
-        last_time = now;
     });
 }

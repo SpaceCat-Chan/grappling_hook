@@ -1,3 +1,9 @@
+struct VertexInput {
+    [[location(0)]] position: vec2<f32>;
+    [[location(1)]] offset: vec2<f32>;
+    [[location(2)]] size: vec2<f32>;
+};
+
 struct VertexOutput {
     [[builtin(position)]] position: vec4<f32>;
 };
@@ -10,9 +16,9 @@ struct Camera {
 var<uniform> c: Camera;
 
 [[stage(vertex)]]
-fn vs_main([[location(0)]] position: vec2<f32>) -> VertexOutput {
+fn vs_main(in: VertexInput) -> VertexOutput {
     var output: VertexOutput;
-    output.position = c.view_proj * vec4<f32>(position, 0.0, 1.0);
+    output.position = c.view_proj * vec4<f32>(in.position * in.size + in.offset, 0.0, 1.0);
     return output;
 }
 

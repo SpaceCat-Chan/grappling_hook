@@ -34,7 +34,7 @@ impl RenderState {
                 force_fallback_adapter: false,
                 compatible_surface: Some(&surface),
             }))
-            .ok_or_else(|| eyre!("failed to get adapter from wgpu").note("you probably don't have a graphics card that supports VULKAN/DX12 (or any other wgpu primary targets, if new ones have been added),\nor maybe this application just doesn't have access to it"))?;
+            .ok_or_else(|| eyre!("failed to get adapter from wgpu")).note("you probably don't have a graphics card that supports VULKAN/DX12 (or any other wgpu primary targets, if new ones have been added),\nor maybe this application just doesn't have access to it")?;
         let preferred_format = surface.get_preferred_format(&adapter).unwrap();
         let winit::dpi::PhysicalSize { width, height } = window.inner_size();
         let surface_config = wgpu::SurfaceConfiguration {
@@ -80,11 +80,18 @@ impl RenderState {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 2 * std::mem::size_of::<f32>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2],
-                }],
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: 2 * std::mem::size_of::<f32>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: 4 * std::mem::size_of::<f32>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32x2],
+                    },
+                ],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -145,28 +152,63 @@ impl RenderState {
         state: &game_state::GameState,
         last_state: &game_state::GameState,
     ) -> color_eyre::Result<()> {
-        let center = last_state.center.lerp(state.center, interpolate);
-        let angle = lerp(last_state.current_angle, state.current_angle, interpolate);
-        let mut transform = Matrix4::from_nonuniform_scale(0.1, state.arm_length, 1.0);
-        transform.concat_self(&Matrix4::from_angle_z(angle));
-        transform.concat_self(&Matrix4::from_translation(center.extend(0.0)));
-        let buffer = self
+        let mut draw_position = Vec::with_capacity(state.objects.num_elements());
+        for (index, new_object) in &state.objects {
+            let last_object = last_state.objects.get(index);
+            if let Some(last_object) = last_object {
+                let pos = lerp(
+                    last_object.get_pos().to_vec(),
+                    new_object.get_pos().to_vec(),
+                    interpolate,
+                );
+                let size = lerp(*last_object.get_size(), *new_object.get_size(), interpolate);
+                draw_position.push([pos.x as f32, pos.y as f32, size.x as f32, size.y as f32]);
+            } else {
+                let pos = new_object.get_pos().to_vec();
+                let size = new_object.get_size();
+                draw_position.push([pos.x as f32, pos.y as f32, size.x as f32, size.y as f32]);
+            }
+        }
+        let position_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("positions buffer"),
+                contents: bytemuck::cast_slice(&draw_position[..]),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        let camera_position = {
+            let new_position = state
+                .objects
+                .get(state.view_object)
+                .map(|o| o.get_pos().to_vec() + o.get_size() / 2.0)
+                .unwrap_or_else(|| cgmath::vec2(0.0, 0.0));
+            let old_position = last_state
+                .objects
+                .get(state.view_object)
+                .map(|o| o.get_pos().to_vec() + o.get_size() / 2.0)
+                .unwrap_or(new_position);
+            lerp(old_position, new_position, interpolate)
+        };
+        let camera = cgmath::Matrix4::from_scale(0.04)
+            * cgmath::Matrix4::from_translation(-camera_position.extend(0.0));
+        let camera = camera.cast::<f32>().unwrap();
+        let camera_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("transform buffer"),
-                contents: bytemuck::cast_slice(AsRef::<[_; 16]>::as_ref(&transform)),
+                contents: bytemuck::cast_slice(AsRef::<[_; 16]>::as_ref(&camera)),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let camera_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("transform bind group"),
             layout: &self.transform_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: buffer.as_entire_binding(),
+                resource: camera_buffer.as_entire_binding(),
             }],
         });
-
         let frame = self.surface.get_current_texture()?;
         let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
             label: Some("render target"),
@@ -192,9 +234,10 @@ impl RenderState {
                 depth_stencil_attachment: None,
             });
             rpass.set_pipeline(&self.pipeline);
-            rpass.set_bind_group(0, &bind_group, &[]);
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            rpass.draw(0..6, 0..1);
+            rpass.set_vertex_buffer(1, position_buffer.slice(..));
+            rpass.set_bind_group(0, &camera_bind_group, &[]);
+            rpass.draw(0..6, 0..(draw_position.len() as _));
         }
         self.queue.submit([encoder.finish()].into_iter());
         frame.present();
@@ -203,5 +246,5 @@ impl RenderState {
 }
 
 fn lerp<T: Add<T> + Mul<f64, Output = T>>(from: T, to: T, interp_by: f64) -> <T as Add<T>>::Output {
-    (from * interp_by) + (to * (1.0 - interp_by))
+    (to * interp_by) + (from * (1.0 - interp_by))
 }
