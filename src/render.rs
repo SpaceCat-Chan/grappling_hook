@@ -196,11 +196,11 @@ impl RenderState {
             rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             rpass.draw(0..6, 0..1);
         }
+        self.queue.submit([encoder.finish()].into_iter());
+        frame.present();
         Ok(())
     }
 }
-
-struct PipelineAndRelated {}
 
 fn lerp<T: Add<T> + Mul<f64, Output = T>>(from: T, to: T, interp_by: f64) -> <T as Add<T>>::Output {
     (from * interp_by) + (to * (1.0 - interp_by))
