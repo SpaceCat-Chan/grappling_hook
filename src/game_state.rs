@@ -39,11 +39,40 @@ impl Object {
             Object::Movable { size, .. } => size,
         }
     }
+    fn get_pos_mut(&mut self) -> &mut cgmath::Point2<f64> {
+        match self {
+            Object::Static { pos, .. } => pos,
+            Object::Movable { pos, .. } => pos,
+        }
+    }
+    fn get_size_mut(&mut self) -> &mut cgmath::Vector2<f64> {
+        match self {
+            Object::Static { size, .. } => size,
+            Object::Movable { size, .. } => size,
+        }
+    }
+    fn reset_velocity_components(&mut self, (x, y): (bool, bool)) {
+        match self {
+            Object::Static { .. } => {}
+            Object::Movable { velocity, .. } => {
+                if x {
+                    velocity.x = 0.0;
+                }
+                if y {
+                    velocity.y = 0.0;
+                }
+            }
+        }
+    }
 
     fn apply_event(&mut self, event: ()) {
         if let Object::Movable { velocity, .. } = self {
             *velocity += cgmath::vec2(0.0, 5.0);
         }
+    }
+
+    fn can_be_pushed(&self) -> bool {
+        matches!(self, Object::Movable { .. })
     }
 }
 
@@ -124,74 +153,29 @@ impl GameState {
                 (*(self as *mut Self)).objects.get_mut(object2),
             )
         } {
-            match (object1, object2) {
-                (Object::Static { .. }, Object::Static { .. }) => {}
-                (
-                    Object::Static {
-                        pos: pos1,
-                        size: size1,
-                    },
-                    Object::Movable {
-                        pos: pos2,
-                        size: size2,
-                        velocity: velocity2,
-                    },
-                ) => {
-                    if let Some(offset) = check_collision(pos1, size1, pos2, size2) {
-                        if offset.x != 0.0 {
-                            velocity2.x = 0.0;
+            if object1.can_be_pushed() || object2.can_be_pushed() {
+                let offset = check_collision(
+                    object1.get_pos(),
+                    object1.get_size(),
+                    object2.get_pos(),
+                    object2.get_size(),
+                );
+                if let Some(offset) = offset {
+                    object1.reset_velocity_components((offset.x != 0.0, offset.y != 0.0));
+                    object2.reset_velocity_components((offset.x != 0.0, offset.y != 0.0));
+                    match (object1.can_be_pushed(), object2.can_be_pushed()) {
+                        (true, true) => {
+                            let offset = offset / 2.0;
+                            *object1.get_pos_mut() += offset;
+                            *object2.get_pos_mut() -= offset;
                         }
-                        if offset.y != 0.0 {
-                            velocity2.y = 0.0;
+                        (true, false) => {
+                            *object1.get_pos_mut() += offset;
                         }
-                        *pos2 -= offset;
-                    }
-                }
-                (
-                    Object::Movable {
-                        pos: pos1,
-                        size: size1,
-                        velocity: velocity1,
-                    },
-                    Object::Static {
-                        pos: pos2,
-                        size: size2,
-                    },
-                ) => {
-                    if let Some(offset) = check_collision(pos1, size1, pos2, size2) {
-                        if offset.x != 0.0 {
-                            velocity1.x = 0.0;
+                        (false, true) => {
+                            *object2.get_pos_mut() -= offset;
                         }
-                        if offset.y != 0.0 {
-                            velocity1.y = 0.0;
-                        }
-                        *pos1 += offset;
-                    }
-                }
-                (
-                    Object::Movable {
-                        pos: pos1,
-                        size: size1,
-                        velocity: velocity1,
-                    },
-                    Object::Movable {
-                        pos: pos2,
-                        size: size2,
-                        velocity: velocity2,
-                    },
-                ) => {
-                    if let Some(offset) = check_collision(pos1, size1, pos2, size2) {
-                        if offset.x != 0.0 {
-                            velocity1.x = 0.0;
-                            velocity2.x = 0.0;
-                        }
-                        if offset.y != 0.0 {
-                            velocity1.y = 0.0;
-                            velocity2.y = 0.0;
-                        }
-                        let offset = offset / 2.0;
-                        *pos1 += offset;
-                        *pos2 -= offset;
+                        (false, false) => unreachable!(),
                     }
                 }
             }
