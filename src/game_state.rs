@@ -1,11 +1,106 @@
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
+
 use cgmath::prelude::*;
 use itertools::Itertools;
 use stable_vec::StableVec;
+use winit::event::ElementState;
 
 #[derive(Clone)]
 struct PlayerController {
-    pending_events: Vec<()>,
+    pending_events: Vec<Event>,
     controlled_object: usize,
+    key_states: HashMap<Direction, ElementState>,
+    last_touch_velocity: cgmath::Vector2<f64>,
+}
+
+impl PlayerController {
+    fn update(&mut self, objects: &StableVec<RefCell<Object>>, dt: f64) {
+        let mut do_jump = false;
+        for event in self.pending_events.drain(..) {
+            match event {
+                Event::Keyboard { button, state } => {
+                    self.key_states.insert(button, state);
+                    if let (Direction::Up, ElementState::Pressed) = (button, state) {
+                        do_jump = true;
+                    }
+                }
+            }
+        }
+        let controlled = self.controlled_object;
+        let object = objects.get(controlled);
+        if let Some(object) = object {
+            let mut object = object.borrow_mut();
+            if let Object {
+                ty: ObjectType::Movable { velocity, .. },
+                touching,
+                ..
+            } = &mut *object
+            {
+                let touching_sides = touching.iter().fold(HashSet::new(), |mut acc, x| {
+                    acc.insert(*x.1);
+                    acc
+                });
+                let average_touch_velocity = if !touching.is_empty() {
+                    (|| {
+                        let mut weights = 0.0;
+                        let mut sum = cgmath::vec2(0.0, 0.0);
+                        for index in touching.keys() {
+                            let other = &objects[*index].borrow();
+                            let contribution = other.surface_friction;
+                            if contribution == 0.0 {
+                                //fucking glue or smth
+                                return other.get_velocity();
+                            }
+                            let contribution = 1.0 / contribution;
+                            sum += other.get_velocity() * contribution;
+                            weights += contribution;
+                        }
+                        sum / weights
+                    })()
+                } else {
+                    self.last_touch_velocity
+                };
+                self.last_touch_velocity = average_touch_velocity;
+
+                if do_jump && !touching.is_empty() {
+                    *velocity += cgmath::vec2(0.0, 10.0);
+                }
+                let (left_state, right_state) = (
+                    self.key_states
+                        .get(&Direction::Left)
+                        .unwrap_or(&ElementState::Released),
+                    self.key_states
+                        .get(&Direction::Right)
+                        .unwrap_or(&ElementState::Released),
+                );
+                if left_state != right_state {
+                    // TODO: make moving in the air and moving on the ground be different
+                    if touching.is_empty() {
+                        // in air
+                        if *left_state == ElementState::Pressed {
+                            velocity.x = average_touch_velocity.x + -15.0;
+                        } else {
+                            velocity.x = average_touch_velocity.x + 15.0;
+                        }
+                        //on ground
+                    } else if *left_state == ElementState::Pressed {
+                        if !touching_sides.contains(&Direction::Left) {
+                            velocity.x = average_touch_velocity.x + -15.0;
+                        }
+                    } else if !touching_sides.contains(&Direction::Right) {
+                        velocity.x = average_touch_velocity.x + 15.0;
+                    }
+                } else if touching.is_empty() {
+                    velocity.x = average_touch_velocity.x
+                } else {
+                    velocity.x = average_touch_velocity.x;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -13,48 +108,46 @@ enum Controller {
     PlayerController(PlayerController),
 }
 
+impl Controller {
+    fn update(&mut self, objects: &StableVec<RefCell<Object>>, dt: f64) {
+        match self {
+            Self::PlayerController(c) => c.update(objects, dt),
+        }
+    }
+}
+
 #[derive(Clone)]
-pub enum Object {
-    Static {
-        pos: cgmath::Point2<f64>,
-        size: cgmath::Vector2<f64>,
-    },
+pub enum ObjectType {
+    Static,
     Movable {
-        pos: cgmath::Point2<f64>,
-        size: cgmath::Vector2<f64>,
         velocity: cgmath::Vector2<f64>,
+        mass: f64,
     },
+    Treadmill {
+        fake_velocity: cgmath::Vector2<f64>,
+    },
+}
+
+#[derive(Clone)]
+pub struct Object {
+    ty: ObjectType,
+    pos: cgmath::Point2<f64>,
+    size: cgmath::Vector2<f64>,
+    surface_friction: f64,
+    touching: HashMap<usize, Direction>,
 }
 
 impl Object {
     pub fn get_pos(&self) -> &cgmath::Point2<f64> {
-        match self {
-            Object::Static { pos, .. } => pos,
-            Object::Movable { pos, .. } => pos,
-        }
+        &self.pos
     }
     pub fn get_size(&self) -> &cgmath::Vector2<f64> {
-        match self {
-            Object::Static { size, .. } => size,
-            Object::Movable { size, .. } => size,
-        }
-    }
-    fn get_pos_mut(&mut self) -> &mut cgmath::Point2<f64> {
-        match self {
-            Object::Static { pos, .. } => pos,
-            Object::Movable { pos, .. } => pos,
-        }
-    }
-    fn get_size_mut(&mut self) -> &mut cgmath::Vector2<f64> {
-        match self {
-            Object::Static { size, .. } => size,
-            Object::Movable { size, .. } => size,
-        }
+        &self.size
     }
     fn reset_velocity_components(&mut self, (x, y): (bool, bool)) {
-        match self {
-            Object::Static { .. } => {}
-            Object::Movable { velocity, .. } => {
+        match &mut self.ty {
+            ObjectType::Static { .. } => {}
+            ObjectType::Movable { velocity, .. } => {
                 if x {
                     velocity.x = 0.0;
                 }
@@ -62,24 +155,78 @@ impl Object {
                     velocity.y = 0.0;
                 }
             }
+            ObjectType::Treadmill { .. } => {}
         }
     }
 
-    fn apply_event(&mut self, event: ()) {
-        if let Object::Movable { velocity, .. } = self {
-            *velocity += cgmath::vec2(0.0, 5.0);
+    fn apply_push(&mut self, push: cgmath::Vector2<f64>) {
+        match &mut self.ty {
+            ObjectType::Movable { velocity, .. } => *velocity += push,
+            _ => {}
         }
     }
 
-    fn can_be_pushed(&self) -> bool {
-        matches!(self, Object::Movable { .. })
+    fn get_velocity(&self) -> cgmath::Vector2<f64> {
+        match &self.ty {
+            ObjectType::Static => cgmath::vec2(0.0, 0.0),
+            ObjectType::Movable { velocity, .. } => *velocity,
+            ObjectType::Treadmill { fake_velocity } => *fake_velocity,
+        }
     }
+
+    fn can_be_pushed(&self) -> Option<f64> {
+        match self.ty {
+            ObjectType::Static => None,
+            ObjectType::Movable { mass, .. } => Some(mass),
+            ObjectType::Treadmill { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Direction {
+    fn invert(&self) -> Self {
+        match self {
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+        }
+    }
+    fn from_vector(vec: &cgmath::Vector2<f64>) -> Self {
+        if vec.x.abs() > vec.y.abs() {
+            if vec.x > 0.0 {
+                Direction::Right
+            } else {
+                Direction::Left
+            }
+        } else if vec.y > 0.0 {
+            Direction::Up
+        } else {
+            Direction::Down
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Event {
+    Keyboard {
+        button: Direction,
+        state: ElementState,
+    },
 }
 
 #[derive(Clone)]
 pub struct GameState {
     controllers: Vec<Controller>,
-    pub objects: StableVec<Object>,
+    pub objects: StableVec<RefCell<Object>>,
     pub view_object: usize,
 }
 
@@ -89,17 +236,43 @@ impl GameState {
             controllers: vec![Controller::PlayerController(PlayerController {
                 pending_events: vec![],
                 controlled_object: 0,
+                key_states: HashMap::new(),
+                last_touch_velocity: cgmath::vec2(0.0, 0.0),
             })],
             objects: [
-                Object::Movable {
-                    pos: cgmath::point2(-0.55, -0.5),
+                RefCell::new(Object {
+                    pos: cgmath::point2(-0.5, 0.5),
                     size: cgmath::vec2(1.0, 1.0),
-                    velocity: cgmath::vec2(0.0, 0.0),
-                },
-                Object::Static {
+                    ty: ObjectType::Movable {
+                        velocity: cgmath::vec2(0.0, 0.0),
+                        mass: 1.0,
+                    },
+                    surface_friction: 1.0,
+                    touching: HashMap::new(),
+                }),
+                RefCell::new(Object {
                     pos: cgmath::point2(-25.0, -25.0),
                     size: cgmath::vec2(50.0, 7.5),
-                },
+                    ty: ObjectType::Static,
+                    surface_friction: 1.0,
+                    touching: HashMap::new(),
+                }),
+                RefCell::new(Object {
+                    pos: cgmath::point2(17.5, -25.0),
+                    size: cgmath::vec2(7.5, 50.0),
+                    ty: ObjectType::Static,
+                    surface_friction: 1.0,
+                    touching: HashMap::new(),
+                }),
+                RefCell::new(Object {
+                    pos: cgmath::point2(-15.0, -19.5),
+                    size: cgmath::vec2(10.0, 4.0),
+                    ty: ObjectType::Treadmill {
+                        fake_velocity: cgmath::vec2(-4.0, 0.0),
+                    },
+                    surface_friction: 0.5,
+                    touching: HashMap::new(),
+                }),
             ]
             .into(),
             view_object: 0,
@@ -107,53 +280,45 @@ impl GameState {
     }
     pub fn update(&mut self, dt: f64) {
         for controller in &mut self.controllers {
-            if let Controller::PlayerController(controller) = controller {
-                let controlled = controller.controlled_object;
-                let object = self.objects.get_mut(controlled);
-                if let Some(object) = object {
-                    for event in controller.pending_events.drain(..) {
-                        object.apply_event(event);
-                    }
-                }
-            }
+            controller.update(&self.objects, dt);
         }
-        for (_, object) in &mut self.objects {
-            if let Object::Movable { velocity, pos, .. } = object {
-                *velocity -= cgmath::vec2(0.0, 9.8) * dt;
-                *pos += *velocity * dt;
+        for (_, object) in &self.objects {
+            let mut object = object.borrow_mut();
+            let object = &mut *object;
+            if let ObjectType::Movable { velocity, .. } = &mut object.ty {
+                *velocity -= cgmath::vec2(0.0, 15.0) * dt;
+                object.pos += *velocity * dt;
             }
         }
 
+        self.check_whats_still_touching();
+
         self.collision_detection();
     }
-    pub fn submit_player_event(&mut self, event: ()) {
+    pub fn submit_player_event(&mut self, event: Event) {
         for controller in &mut self.controllers {
             if let Controller::PlayerController(controller) = controller {
                 controller.pending_events.push(event);
             }
         }
     }
-    fn collision_detection(&mut self) {
-        // lifetime issues without the collect, clippy is just going to have to deal with it
-        #[allow(clippy::needless_collect)]
-        let indexes: Vec<_> = self.objects.indices().collect();
-        for (object1, object2) in indexes.into_iter().tuple_combinations() {
+    fn collision_detection(&self) {
+        for (object1, object2) in self.objects.indices().tuple_combinations() {
             self.handle_collision(object1, object2);
         }
     }
 
-    fn handle_collision(&mut self, object1: usize, object2: usize) {
-        if object1 == object2 {
-            return; //impossible, but just in case, since it would otherwise cause chaos
+    fn handle_collision(&self, object1_index: usize, object2_index: usize) {
+        if object1_index == object2_index {
+            return; //shouldn't happen, but just in case, since it would otherwise cause a panic
         }
-        //it is now gauranteed that this is safe
-        if let (Some(object1), Some(object2)) = unsafe {
-            (
-                (*(self as *mut Self)).objects.get_mut(object1),
-                (*(self as *mut Self)).objects.get_mut(object2),
-            )
-        } {
-            if object1.can_be_pushed() || object2.can_be_pushed() {
+        if let (Some(object1), Some(object2)) = (
+            self.objects.get(object1_index),
+            self.objects.get(object2_index),
+        ) {
+            let mut object1 = object1.borrow_mut();
+            let mut object2 = object2.borrow_mut();
+            if object1.can_be_pushed().is_some() || object2.can_be_pushed().is_some() {
                 let offset = check_collision(
                     object1.get_pos(),
                     object1.get_size(),
@@ -161,21 +326,69 @@ impl GameState {
                     object2.get_size(),
                 );
                 if let Some(offset) = offset {
+                    let direction = Direction::from_vector(&offset);
+                    object1.touching.insert(object2_index, direction.invert());
+                    object2.touching.insert(object1_index, direction);
                     object1.reset_velocity_components((offset.x != 0.0, offset.y != 0.0));
                     object2.reset_velocity_components((offset.x != 0.0, offset.y != 0.0));
+                    let total = object1.surface_friction * object2.surface_friction;
+                    let velocity_offset = if offset.x == 0.0 {
+                        cgmath::vec2(
+                            (object1.get_velocity().x - object2.get_velocity().x) / total,
+                            0.0,
+                        )
+                    } else if offset.y == 0.0 {
+                        cgmath::vec2(
+                            0.0,
+                            (object1.get_velocity().y - object2.get_velocity().y) / total,
+                        )
+                    } else {
+                        cgmath::vec2(0.0, 0.0)
+                    };
                     match (object1.can_be_pushed(), object2.can_be_pushed()) {
-                        (true, true) => {
-                            let offset = offset / 2.0;
-                            *object1.get_pos_mut() += offset;
-                            *object2.get_pos_mut() -= offset;
+                        (Some(mass1), Some(mass2)) => {
+                            let ratio = mass1 / (mass1 + mass2);
+                            let offset1 = offset * ratio;
+                            object1.pos += offset1;
+                            object2.pos -= offset - offset1;
+                            object1.apply_push(-velocity_offset * ratio);
+                            object2.apply_push(velocity_offset * (1.0 - ratio));
                         }
-                        (true, false) => {
-                            *object1.get_pos_mut() += offset;
+                        (Some(_), None) => {
+                            object1.pos += offset;
+                            object1.apply_push(-velocity_offset);
                         }
-                        (false, true) => {
-                            *object2.get_pos_mut() -= offset;
+                        (None, Some(_)) => {
+                            object2.pos -= offset;
+                            object2.apply_push(velocity_offset);
                         }
-                        (false, false) => unreachable!(),
+                        (None, None) => unreachable!(),
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_whats_still_touching(&mut self) {
+        for (index, object) in &self.objects {
+            let mut object = object.borrow_mut();
+            let touching = object.touching.clone();
+            object.touching.clear();
+            for (other_index, _) in touching {
+                if index == other_index {
+                    continue;
+                }
+                let other_object = self.objects.get(other_index);
+                if let Some(other) = other_object {
+                    let other = other.borrow();
+                    const CHECK_SIZE: f64 = 0.01;
+                    let effective_pos = other.pos.map(|a| a - CHECK_SIZE);
+                    let effective_size = other.size.map(|a| a + CHECK_SIZE);
+                    if let Some(offset) =
+                        check_collision(&object.pos, &object.size, &effective_pos, &effective_size)
+                    {
+                        let direction = Direction::from_vector(&offset);
+                        object.touching.insert(other_index, direction.invert());
                     }
                 }
             }
@@ -210,7 +423,7 @@ fn check_collision(
         } else {
             0.0
         };
-        if offset_x.abs() > offset_y.abs() {
+        if offset_x == 0.0 || (offset_x.abs() > offset_y.abs() && offset_y != 0.0) {
             offset_x = 0.0;
         } else {
             offset_y = 0.0;

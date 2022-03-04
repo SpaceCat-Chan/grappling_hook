@@ -154,8 +154,10 @@ impl RenderState {
     ) -> color_eyre::Result<()> {
         let mut draw_position = Vec::with_capacity(state.objects.num_elements());
         for (index, new_object) in &state.objects {
+            let new_object = new_object.borrow();
             let last_object = last_state.objects.get(index);
             if let Some(last_object) = last_object {
+                let last_object = last_object.borrow();
                 let pos = lerp(
                     last_object.get_pos().to_vec(),
                     new_object.get_pos().to_vec(),
@@ -181,11 +183,13 @@ impl RenderState {
             let new_position = state
                 .objects
                 .get(state.view_object)
+                .map(|o| o.borrow())
                 .map(|o| o.get_pos().to_vec() + o.get_size() / 2.0)
                 .unwrap_or_else(|| cgmath::vec2(0.0, 0.0));
             let old_position = last_state
                 .objects
                 .get(state.view_object)
+                .map(|o| o.borrow())
                 .map(|o| o.get_pos().to_vec() + o.get_size() / 2.0)
                 .unwrap_or(new_position);
             lerp(old_position, new_position, interpolate)

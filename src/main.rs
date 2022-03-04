@@ -4,11 +4,13 @@ mod render;
 use color_eyre::Result;
 use std::time::Instant;
 use winit::{
-    event::{Event, WindowEvent},
+    event::{Event, KeyboardInput, WindowEvent},
     event_loop::ControlFlow,
 };
 
 fn main() -> Result<()> {
+    simple_logger::init_with_level(log::Level::Warn)?;
+
     const TICK_RATE: f64 = 1.0 / 60.0;
 
     let event_loop = winit::event_loop::EventLoop::new();
@@ -40,14 +42,28 @@ fn main() -> Result<()> {
             }
             Event::WindowEvent {
                 event:
-                    WindowEvent::MouseInput {
-                        state: winit::event::ElementState::Released,
-                        button: winit::event::MouseButton::Left,
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                scancode, state: e, ..
+                            },
                         ..
                     },
                 ..
             } => {
-                state.submit_player_event(());
+                println!("{}", scancode);
+                let direction = match scancode {
+                    // tested on my keyboard
+                    30 => game_state::Direction::Left,  // A
+                    17 => game_state::Direction::Up,    // W
+                    32 => game_state::Direction::Right, // D
+                    31 => game_state::Direction::Down,  // S
+                    _ => return,
+                };
+                state.submit_player_event(game_state::Event::Keyboard {
+                    button: direction,
+                    state: e,
+                })
             }
             Event::MainEventsCleared => {
                 let now = Instant::now();
