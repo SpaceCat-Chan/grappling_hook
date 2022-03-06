@@ -104,6 +104,9 @@ impl PlayerController {
                     }
                     *velocity += velocity_offset;
                 }
+                if touching_sides.contains(&Direction::Down) {
+                    velocity.y += 15.0 * dt;
+                }
             }
         }
     }
