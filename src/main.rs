@@ -51,7 +51,7 @@ fn main() -> Result<()> {
                     },
                 ..
             } => {
-                println!("{}", scancode);
+                //println!("{}", scancode);
                 let direction = match scancode {
                     // tested on my keyboard
                     30 => game_state::Direction::Left,  // A

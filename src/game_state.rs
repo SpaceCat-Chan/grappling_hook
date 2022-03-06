@@ -192,7 +192,7 @@ impl Object {
     }
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
 pub enum Direction {
     Left,
     Right,
@@ -258,7 +258,7 @@ impl GameState {
                         velocity: cgmath::vec2(0.0, 0.0),
                         mass: 1.0,
                     },
-                    surface_friction: 1000.0, //did you know? a higher surface friction is actually lower, NOTE: this is a hack
+                    surface_friction: 1.0,
                     touching: HashMap::new(),
                 }),
                 RefCell::new(Object {
@@ -394,7 +394,7 @@ impl GameState {
                     let other = other.borrow();
                     const CHECK_SIZE: f64 = 0.01;
                     let effective_pos = other.pos.map(|a| a - CHECK_SIZE);
-                    let effective_size = other.size.map(|a| a + CHECK_SIZE);
+                    let effective_size = other.size.map(|a| a + CHECK_SIZE * 2.0);
                     if let Some(offset) =
                         check_collision(&object.pos, &object.size, &effective_pos, &effective_size)
                     {
