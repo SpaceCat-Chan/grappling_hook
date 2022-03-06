@@ -14,6 +14,8 @@ struct PlayerController {
     controlled_object: usize,
     key_states: HashMap<Direction, ElementState>,
     last_touch_velocity: cgmath::Vector2<f64>,
+    top_speed: f64,
+    acceleration_speed: f64,
 }
 
 impl PlayerController {
@@ -65,9 +67,6 @@ impl PlayerController {
                 };
                 self.last_touch_velocity = average_touch_velocity;
 
-                if do_jump && !touching.is_empty() {
-                    *velocity += cgmath::vec2(0.0, 10.0);
-                }
                 let (left_state, right_state) = (
                     self.key_states
                         .get(&Direction::Left)
@@ -77,26 +76,34 @@ impl PlayerController {
                         .unwrap_or(&ElementState::Released),
                 );
                 if left_state != right_state {
-                    // TODO: make moving in the air and moving on the ground be different
-                    if touching.is_empty() {
-                        // in air
-                        if *left_state == ElementState::Pressed {
-                            velocity.x = average_touch_velocity.x + -15.0;
-                        } else {
-                            velocity.x = average_touch_velocity.x + 15.0;
+                    if *left_state == ElementState::Pressed {
+                        velocity.x += -self.acceleration_speed * dt;
+                        if velocity.x < average_touch_velocity.x - self.top_speed {
+                            velocity.x = average_touch_velocity.x - self.top_speed;
                         }
-                        //on ground
-                    } else if *left_state == ElementState::Pressed {
-                        if !touching_sides.contains(&Direction::Left) {
-                            velocity.x = average_touch_velocity.x + -15.0;
+                    } else {
+                        velocity.x += self.acceleration_speed * dt;
+                        if velocity.x > average_touch_velocity.x + self.top_speed {
+                            velocity.x = average_touch_velocity.x + self.top_speed;
                         }
-                    } else if !touching_sides.contains(&Direction::Right) {
-                        velocity.x = average_touch_velocity.x + 15.0;
                     }
-                } else if touching.is_empty() {
-                    velocity.x = average_touch_velocity.x
                 } else {
-                    velocity.x = average_touch_velocity.x;
+                    let target = average_touch_velocity.x - velocity.x;
+                    let mut difference = self.acceleration_speed * dt;
+                    if difference > target.abs() {
+                        difference = target.abs()
+                    }
+                    velocity.x += difference * target.signum();
+                }
+                if do_jump && !touching.is_empty() {
+                    let mut velocity_offset = cgmath::vec2(0.0, 10.0);
+                    if touching_sides.contains(&Direction::Left) {
+                        velocity_offset.x += 5.0;
+                    } else if touching_sides.contains(&Direction::Right) {
+                        velocity_offset.x -= 5.0;
+                    }
+                    *velocity += velocity_offset;
+                    self.last_touch_velocity = *velocity;
                 }
             }
         }
@@ -238,6 +245,8 @@ impl GameState {
                 controlled_object: 0,
                 key_states: HashMap::new(),
                 last_touch_velocity: cgmath::vec2(0.0, 0.0),
+                top_speed: 10.0,
+                acceleration_speed: 60.0,
             })],
             objects: [
                 RefCell::new(Object {
@@ -247,7 +256,7 @@ impl GameState {
                         velocity: cgmath::vec2(0.0, 0.0),
                         mass: 1.0,
                     },
-                    surface_friction: 1.0,
+                    surface_friction: 1000.0, //did you know? a higher surface friction is actually lower, NOTE: this is a hack
                     touching: HashMap::new(),
                 }),
                 RefCell::new(Object {
