@@ -98,12 +98,11 @@ impl PlayerController {
                 if do_jump && !touching.is_empty() {
                     let mut velocity_offset = cgmath::vec2(0.0, 10.0);
                     if touching_sides.contains(&Direction::Left) {
-                        velocity_offset.x += 5.0;
+                        velocity_offset.x += 10.0;
                     } else if touching_sides.contains(&Direction::Right) {
-                        velocity_offset.x -= 5.0;
+                        velocity_offset.x -= 10.0;
                     }
                     *velocity += velocity_offset;
-                    self.last_touch_velocity = *velocity;
                 }
             }
         }
